@@ -1,12 +1,160 @@
 // ==UserScript==
 // @name         osu!koko
 // @namespace    chrafos
-// @version      1.0
-// @description  Overlay on index & detail; auto-download + auto-close; custom link option; reload-safe; SPA-safe; prevents multi-triggers.
+// @version      1.2.0
+// @description  Minimal osu!-native HUD + instant beatmapset auto-download, auto-close, and custom mirror templates.
 // @author       chrafos
 // @match        https://osu.ppy.sh/beatmapsets*
-// @run-at       document-idle
+// @run-at       document-start
+// @grant        GM_download
 // @grant        GM_openInTab
+// @connect      catboy.best
+// @connect      *
 // ==/UserScript==
 
-(()=>{"use strict";const e="osukoko.overlay.settings",t="https://catboy.best/d/${id}",n="https://catboy.best/d/${id}n",i=t=>localStorage.setItem(e,JSON.stringify(t)),o=(e,t,n)=>Math.max(t,Math.min(n,e)),s=(()=>{try{return JSON.parse(localStorage.getItem(e)||"{}")}catch{return{}}})(),d={DwnEnbl:s.DwnEnbl??!0,DwnBmVi:s.DwnBmVi??!1,AutoClose:s.AutoClose??!0,UseCustom:s.UseCustom??!1,customVid:s.customVid??"",customNoVid:s.customNoVid??"",ui:Object.assign({x:24,y:24,w:360,h:230,minimized:!1},s.ui||{})},c=()=>{const e=location.pathname.match(/^\/beatmapsets\/(\d+)(?:[\/?#]|$)/);return e?e[1]:null},l=e=>{if(!e)return"";let t=e.trim().replace(/\s+/g,"");return/^https?:\/\//i.test(t)||(t="https://"+t),t=t.replace(/^http:\/\//i,"https://"),t.includes("${id}")||(t+=t.endsWith("/")?"${id}":"/${id}"),/^https:\/\//i.test(t)?t:""},a=(e,i)=>(e=>d.UseCustom&&(e?d.customNoVid:d.customVid)||(e?n:t))(i).replace(/\$\{id\}/g,encodeURIComponent(e));let r={id:null,t:0};function u(){const e=c();if(!e||!d.DwnEnbl)return;if(!function(e){const t=Date.now();return!(r.id===e&&t-r.t<1500||(r={id:e,t:t},0))}(e))return;var t;!function(e){try{if("function"==typeof GM_openInTab)return void GM_openInTab(e,{active:!1,insert:!0})}catch{}try{const t=document.createElement("a");t.href=e,t.target="_blank",t.rel="noopener",document.body.appendChild(t),t.click(),t.remove()}catch{location.href=e}}(a(e,d.DwnBmVi)),t=e,d.AutoClose&&(window.close(),setTimeout((()=>{open("","_self"),window.close()}),100),setTimeout((()=>{"hidden"!==document.visibilityState&&t&&(history.length>1?history.back():location.replace("https://osu.ppy.sh/beatmapsets"))}),300))}function m(){!function(){if(document.getElementById("ok-overlay-host"))return;const e=document.createElement("div");e.id="ok-overlay-host",e.style.position="fixed",e.style.zIndex="2147483647",document.documentElement.appendChild(e);const s=e.attachShadow({mode:"open"}),c=document.createElement("style");c.textContent='\n      :host{all:initial;}\n      *,*::before,*::after{box-sizing:border-box;font-family:system-ui,Segoe UI,Arial;}\n      .win{position:fixed;left:24px;top:24px;width:360px;height:230px;background:#111;color:#e5e7eb;\n        border:1px solid #333;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,.45);\n        display:flex;flex-direction:column;overflow:hidden;}\n      .titlebar{height:34px;background:#1a1a1a;border-bottom:1px solid #222;display:flex;align-items:center;\n        justify-content:space-between;padding:0 10px;cursor:move;user-select:none;}\n      .title{font-weight:600;font-size:13px;}\n      .btn{border:0;background:#222;color:#ccc;border-radius:4px;width:24px;height:24px;cursor:pointer;}\n      .btn:hover{background:#2c2c2c;}\n      .content{flex:1;padding:10px;font-size:13px;line-height:1.35;}\n      label.row{display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;}\n      input[type="checkbox"]{width:16px;height:16px;}\n      .field{display:flex;flex-direction:column;gap:4px;margin-top:6px;}\n      .field input[type="text"]{background:#0e0e0e;border:1px solid #2a2a2a;color:#e5e7eb;border-radius:6px;padding:6px 8px;}\n      .hint{font-size:11px;color:#a1a1aa;}\n      .resize{position:absolute;right:0;bottom:0;width:12px;height:12px;cursor:nwse-resize;\n        background:linear-gradient(135deg,transparent 50%,#555 50%);}\n    ',s.appendChild(c);const a=document.createElement("div");a.className="win",a.innerHTML=`\n      <div class="titlebar" data-drag>\n        <div class="title">osu!koko <span style="opacity:.6">overlay</span></div>\n        <button class="btn" data-min>—</button>\n      </div>\n      <div class="content">\n        <label class="row"><input type="checkbox" id="DwnEnbl"> Download Enable</label>\n        <label class="row"><input type="checkbox" id="DwnBmVi"> Download Without Video</label>\n        <label class="row"><input type="checkbox" id="AutoClose"> Auto-Close After Download</label>\n        <label class="row"><input type="checkbox" id="UseCustom"> Use Custom Link</label>\n        <div id="customWrap">\n          <div class="field">\n            <label>Custom URL (with video)</label>\n            <input type="text" id="customVid" placeholder="https://catboy.best/d/\${id}">\n            <div class="hint">Empty = default <code>${t}</code></div>\n          </div>\n          <div class="field">\n            <label>Custom URL (without video)</label>\n            <input type="text" id="customNoVid" placeholder="https://catboy.best/d/\${id}n">\n            <div class="hint">Empty = default <code>${n}</code></div>\n          </div>\n        </div>\n      </div>\n      <div class="resize" data-resize></div>\n    `,s.appendChild(a);const r={DwnEnbl:s.getElementById("DwnEnbl"),DwnBmVi:s.getElementById("DwnBmVi"),AutoClose:s.getElementById("AutoClose"),UseCustom:s.getElementById("UseCustom"),customVid:s.getElementById("customVid"),customNoVid:s.getElementById("customNoVid"),wrap:s.getElementById("customWrap"),content:a.querySelector(".content")};r.DwnEnbl.checked=d.DwnEnbl,r.DwnBmVi.checked=d.DwnBmVi,r.AutoClose.checked=d.AutoClose,r.UseCustom.checked=d.UseCustom,r.customVid.value=d.customVid,r.customNoVid.value=d.customNoVid;const u=()=>r.wrap.style.display=d.UseCustom?"":"none";u();const m=()=>{const e=window.innerWidth,t=window.innerHeight,n=d.ui;n.x=o(n.x,8,e-160),n.y=o(n.y,8,t-80),n.w=o(n.w,300,e-32),n.h=o(n.h,160,t-32),Object.assign(a.style,{left:`${n.x}px`,top:`${n.y}px`,width:`${n.w}px`,height:`${n.h}px`})},p=()=>{d.ui.minimized?(r.content.style.display="none",a.style.height="34px"):(r.content.style.display="",m())};m(),p();const h=a.querySelector("[data-drag]");h.addEventListener("mousedown",(e=>{if(0!==e.button)return;const t=a.getBoundingClientRect(),n=e.clientX,s=e.clientY,c=t.left,l=t.top,r=e=>{a.style.left=o(c+e.clientX-n,0,window.innerWidth-80)+"px",a.style.top=o(l+e.clientY-s,0,window.innerHeight-40)+"px"},u=()=>{document.removeEventListener("mousemove",r),document.removeEventListener("mouseup",u);const e=a.getBoundingClientRect();d.ui.x=e.left,d.ui.y=e.top,i(d)};document.addEventListener("mousemove",r),document.addEventListener("mouseup",u)})),h.addEventListener("dblclick",(()=>{d.ui.minimized=!d.ui.minimized,p(),i(d)})),a.querySelector(".resize").addEventListener("mousedown",(e=>{if(0!==e.button)return;const t=a.getBoundingClientRect(),n=e.clientX,s=e.clientY,c=t.width,l=t.height,r=e=>{a.style.width=o(c+e.clientX-n,300,window.innerWidth-32)+"px",a.style.height=o(l+e.clientY-s,160,window.innerHeight-32)+"px"},u=()=>{document.removeEventListener("mousemove",r),document.removeEventListener("mouseup",u);const e=a.getBoundingClientRect();d.ui.w=e.width,d.ui.h=e.height,i(d)};document.addEventListener("mousemove",r),document.addEventListener("mouseup",u)})),s.querySelector("[data-min]").addEventListener("click",(()=>{d.ui.minimized=!d.ui.minimized,p(),i(d)})),r.DwnEnbl.addEventListener("input",(()=>{d.DwnEnbl=r.DwnEnbl.checked,i(d)})),r.DwnBmVi.addEventListener("input",(()=>{d.DwnBmVi=r.DwnBmVi.checked,i(d)})),r.AutoClose.addEventListener("input",(()=>{d.AutoClose=r.AutoClose.checked,i(d)})),r.UseCustom.addEventListener("input",(()=>{d.UseCustom=r.UseCustom.checked,u(),i(d)})),r.customVid.addEventListener("change",(()=>{d.customVid=l(r.customVid.value),r.customVid.value=d.customVid,i(d)})),r.customNoVid.addEventListener("change",(()=>{d.customNoVid=l(r.customNoVid.value),r.customNoVid.value=d.customNoVid,i(d)})),window.addEventListener("resize",m)}(),u()}m();const p=history.pushState,h=history.replaceState;history.pushState=function(...e){const t=p.apply(this,e);return setTimeout(m,0),t},history.replaceState=function(...e){const t=h.apply(this,e);return setTimeout(m,0),t},window.addEventListener("popstate",m);let b=location.href;new MutationObserver((()=>{location.href!==b&&(b=location.href,m())})).observe(document,{subtree:!0,childList:!0})})();
+(()=>{"use strict";const M="osukoko.overlay.settings",T="ok-hud-host",B="https://osu.ppy.sh/beatmapsets",H=/^\/beatmapsets\/(\d+)(?:[/?#]|$)/,G=/\s+/g,A=/^http:\/\//i,O=/^https:\/\//i,$=/^[a-z][a-z0-9+.-]*:/i,R=/\$\{id\}/g,v=Object.freeze({vid:"https://catboy.best/d/${id}",noVid:"https://catboy.best/d/${id}n"}),N=(t,e,o)=>t<e?e:t>o?o:t,L=(t,e)=>{const o=Number(t);return Number.isFinite(o)?o:e};function D(t){if(typeof t!="string"||!t)return"";let e=t.trim().replace(G,"");if(!e)return"";if(A.test(e))e=e.replace(A,"https://");else if(!O.test(e)){if($.test(e))return"";e="https://"+e}e.includes("${id}")||(e+=e.endsWith("/")?"${id}":"/${id}");try{if(new URL(e.replace(R,"1")).protocol!=="https:")return""}catch{return""}return e}function P(){let t=null;try{t=JSON.parse(localStorage.getItem(M)||"null")}catch{t=null}const e=t&&typeof t=="object"?t:{},o=e.ui&&typeof e.ui=="object"?e.ui:{};return{DwnEnbl:!!(e.DwnEnbl??!0),DwnBmVi:!!(e.DwnBmVi??!1),AutoClose:!!(e.AutoClose??!0),UseCustom:!!(e.UseCustom??!1),customVid:D(e.customVid),customNoVid:D(e.customNoVid),ui:{x:L(o.x,16),y:L(o.y,-1),minimized:!!(o.minimized??!1)}}}function g(t){try{localStorage.setItem(M,JSON.stringify(t))}catch{}}const k=(t=location.pathname)=>{const e=H.exec(t);return e?e[1]:null};function q(t,e){const o=t.DwnBmVi,a=o?v.noVid:v.vid;return(t.UseCustom&&(o?t.customNoVid:t.customVid)||a).replace(R,encodeURIComponent(e))}function V(t){try{const e=document.body||document.documentElement;if(e){const o=document.createElement("a");o.href=t,o.target="_blank",o.rel="noopener",o.referrerPolicy="origin",e.appendChild(o),o.click(),o.remove();return}}catch{}if(typeof GM_openInTab=="function")try{GM_openInTab(t,{active:!1,insert:!0});return}catch{}location.href=t}function X(t,e,o){if(typeof GM_download=="function"){let a=!1;const r=()=>{a||(a=!0,o())};try{GM_download({url:t,name:`${e}.osz`,saveAs:!1,headers:{Referer:`${location.origin}/`},onprogress:r,onload:r,onerror:()=>{V(t),r()}});return}catch{}}V(t),o()}function Y(t){let e=null,o=null,a=0,r=0,i=0;const m=()=>{r&&clearTimeout(r),i&&clearTimeout(i),r=0,i=0},l=h=>{!t.AutoClose||k()!==h||(window.close(),r||(r=setTimeout(()=>{r=0,k()===h&&(window.open("","_self"),window.close())},80)),i||(i=setTimeout(()=>{i=0,!(document.visibilityState==="hidden"||k()!==h)&&(history.length>1?history.back():location.replace(B))},320)))};return function(){const u=k();if(!u)return e=null,m(),!1;if(!t.DwnEnbl||u===e)return!1;const w=Date.now();if(o===u&&w-a<1500)return!1;e=u,o=u,a=w,m();const b=q(t,u),d=t.AutoClose?setTimeout(()=>l(u),450):0;return X(b,u,()=>{d&&clearTimeout(d),l(u)}),t.AutoClose}}const F=`
+    :host {
+      all: initial;
+      position: fixed;
+      top: 0;
+      left: 0;
+      z-index: 2147483647;
+      pointer-events: none;
+      --bg-bar: hsl(var(--hsl-b5, 200, 10%, 15%));
+      --bg-seg: hsl(var(--hsl-b4, 200, 10%, 20%));
+      --bg-hi: hsl(var(--hsl-b3, 200, 10%, 25%));
+      --line: hsl(var(--hsl-b2, 200, 10%, 30%));
+      --line-hi: hsl(var(--hsl-b1, 200, 10%, 40%));
+      --accent: hsl(var(--hsl-h1, 200, 100%, 70%));
+      --accent-dim: hsl(var(--hsl-h2, 200, 50%, 45%));
+      --ink: hsl(var(--hsl-c1, 200, 40%, 100%));
+      --ink-sub: hsl(var(--hsl-l2, 200, 40%, 75%));
+      --ink-off: hsl(var(--hsl-f1, 200, 10%, 60%));
+    }
+    *, *::before, *::after {
+      box-sizing: border-box;
+      font-family: Torus, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    .dock {
+      position: fixed;
+      top: 0;
+      left: 0;
+      pointer-events: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      will-change: transform;
+      user-select: none;
+    }
+    .bar {
+      display: inline-flex;
+      align-items: stretch;
+      height: 28px;
+      background: var(--bg-bar);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .grip {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 9px 0 11px;
+      background: var(--bg-seg);
+      border-right: 1px solid var(--line);
+      color: var(--ink-sub);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      cursor: grab;
+      touch-action: none;
+    }
+    .grip:active { cursor: grabbing; }
+    .grip::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 3px;
+      background: var(--line-hi);
+      transition: background 120ms ease;
+    }
+    .dock[data-armed="1"] .grip::before { background: var(--accent); }
+    .dock[data-armed="1"] .grip { color: var(--ink); }
+    .keys {
+      display: inline-flex;
+      align-items: stretch;
+    }
+    .dock[data-min="1"] .keys,
+    .dock[data-min="1"] .tray { display: none; }
+    .key {
+      position: relative;
+      appearance: none;
+      border: 0;
+      border-right: 1px solid var(--line);
+      background: transparent;
+      color: var(--ink-off);
+      padding: 0 9px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .03em;
+      cursor: pointer;
+      transition: background 110ms ease, color 110ms ease;
+    }
+    .key:last-child { border-right: 0; }
+    .key:hover { background: var(--bg-seg); color: var(--ink); }
+    .key[aria-pressed="true"] {
+      background: var(--bg-hi);
+      color: var(--ink);
+    }
+    .key[aria-pressed="true"]::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 2px;
+      background: var(--accent);
+    }
+    .tray {
+      width: 280px;
+      padding: 8px;
+      background: var(--bg-bar);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .tray[hidden] { display: none; }
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .tag {
+      width: 40px;
+      flex: 0 0 40px;
+      color: var(--ink-off);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .04em;
+    }
+    .in {
+      flex: 1;
+      min-width: 0;
+      height: 24px;
+      padding: 0 7px;
+      background: var(--bg-seg);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: var(--ink);
+      font-size: 11px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      outline: none;
+    }
+    .in::placeholder { color: var(--ink-off); opacity: .7; }
+    .in:focus { border-color: var(--accent-dim); }
+  `;function _(t){if(document.getElementById(T))return;const e=document.body||document.documentElement;if(!e)return;const o=document.createElement("div");o.id=T,e.appendChild(o);const a=o.attachShadow({mode:"open"}),r=document.createElement("style");r.textContent=F;const i=document.createElement("div");i.className="dock",i.innerHTML=`<div class="bar"><div class="grip" data-grip title="Drag to move \xB7 Double-click to collapse">koko</div><div class="keys"><button type="button" class="key" data-k="DwnEnbl" title="Auto-download">DL</button><button type="button" class="key" data-k="DwnBmVi" title="Without video">NOVID</button><button type="button" class="key" data-k="AutoClose" title="Auto-close tab">CLOSE</button><button type="button" class="key" data-k="UseCustom" title="Use custom mirror">CUSTOM</button><button type="button" class="key" data-tray title="Mirror URLs">\u22EF</button></div></div><div class="tray" hidden><div class="row"><span class="tag">VID</span><input class="in" type="text" data-u="customVid" placeholder="${v.vid}"></div><div class="row"><span class="tag">NOVID</span><input class="in" type="text" data-u="customNoVid" placeholder="${v.noVid}"></div></div>`,a.append(r,i);const m=i.querySelector(".tray"),l=i.querySelector("[data-grip]"),h=i.querySelector("[data-tray]"),u=i.querySelectorAll("[data-k]"),w=i.querySelectorAll("[data-u]");let b=!1,d=t.ui.x,p=t.ui.y,C=0;const y=(n,s)=>{const c=i.getBoundingClientRect(),S=Math.max(10,window.innerWidth-(c.width||220)-10),j=Math.max(10,window.innerHeight-(c.height||28)-10);d=N(n,10,S),p=N(s,10,j),i.style.transform=`translate3d(${d}px, ${p}px, 0)`},E=()=>{i.dataset.armed=t.DwnEnbl?"1":"0",i.dataset.min=t.ui.minimized?"1":"0";for(const n of u)n.setAttribute("aria-pressed",String(!!t[n.dataset.k]));m.hidden=!b||t.ui.minimized,h.setAttribute("aria-pressed",String(!m.hidden))};for(const n of w)n.value=t[n.dataset.u];E(),p<0&&(p=Math.max(10,window.innerHeight-44)),y(d,p),a.addEventListener("click",n=>{const s=n.target;if(!(s instanceof HTMLElement))return;const c=s.dataset.k;if(c){t[c]=!t[c],c==="UseCustom"&&t.UseCustom&&(b=!0),E(),y(d,p),g(t);return}"tray"in s.dataset&&(b=!b,E(),y(d,p))}),a.addEventListener("change",n=>{const s=n.target;if(!(s instanceof HTMLInputElement))return;const c=s.dataset.u;if(!c)return;const S=D(s.value);t[c]=S,s.value=S,g(t)}),l.addEventListener("dblclick",()=>{t.ui.minimized=!t.ui.minimized,E(),y(d,p),g(t)});let f=null;l.addEventListener("pointerdown",n=>{n.button===0&&(f={sx:n.clientX,sy:n.clientY,ox:d,oy:p,moved:!1},l.setPointerCapture(n.pointerId))}),l.addEventListener("pointermove",n=>{if(!f)return;const s=n.clientX-f.sx,c=n.clientY-f.sy;!f.moved&&Math.abs(s)+Math.abs(c)<3||(f.moved=!0,y(f.ox+s,f.oy+c))});const U=n=>{if(!f)return;const s=f.moved;f=null,l.hasPointerCapture(n.pointerId)&&l.releasePointerCapture(n.pointerId),s&&(t.ui.x=Math.round(d),t.ui.y=Math.round(p),g(t))};l.addEventListener("pointerup",U),l.addEventListener("pointercancel",U),window.addEventListener("resize",()=>{C||(C=requestAnimationFrame(()=>{C=0,y(d,p)}))},{passive:!0})}function I(t){document.body?_(t):document.addEventListener("DOMContentLoaded",()=>_(t),{once:!0})}function W(t){let e=location.href;const o=()=>{const r=location.href;r!==e&&(e=r,t())},a=r=>function(...m){const l=r.apply(this,m);return o(),l};history.pushState=a(history.pushState),history.replaceState=a(history.replaceState),window.addEventListener("popstate",o,{passive:!0})}const x=P(),z=Y(x);z()?setTimeout(()=>{document.visibilityState!=="hidden"&&I(x)},350):I(x),W(()=>{z(),I(x)})})();

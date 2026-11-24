@@ -1,263 +1,586 @@
 // ==UserScript==
 // @name         osu!koko
 // @namespace    chrafos
-// @version      1.0
-// @description  Overlay on index & detail; auto-download + auto-close; custom link option; reload-safe; SPA-safe; prevents multi-triggers.
+// @version      1.2.0
+// @description  Minimal osu!-native HUD + instant beatmapset auto-download, auto-close, and custom mirror templates.
 // @author       chrafos
 // @match        https://osu.ppy.sh/beatmapsets*
-// @run-at       document-idle
+// @run-at       document-start
+// @grant        GM_download
 // @grant        GM_openInTab
+// @connect      catboy.best
+// @connect      *
 // ==/UserScript==
 
 (() => {
   'use strict';
 
-  const KEY = 'osukoko.overlay.settings';
-  const DEF_VID   = 'https://catboy.best/d/${id}';
-  const DEF_NOVID = 'https://catboy.best/d/${id}n';
+  const STORAGE_KEY = 'osukoko.overlay.settings';
+  const HOST_ID = 'ok-hud-host';
+  const INDEX_URL = 'https://osu.ppy.sh/beatmapsets';
+  const DEDUPE_MS = 1500;
+  const MARGIN = 10;
 
-  const load = () => { try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch { return {}; } };
-  const save = (s) => localStorage.setItem(KEY, JSON.stringify(s));
-  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+  const RE_SET_ID = /^\/beatmapsets\/(\d+)(?:[/?#]|$)/;
+  const RE_WHITESPACE = /\s+/g;
+  const RE_HTTP = /^http:\/\//i;
+  const RE_HTTPS = /^https:\/\//i;
+  const RE_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+  const RE_ID_TOKEN = /\$\{id\}/g;
 
-  const persisted = load();
-  const state = {
-    DwnEnbl:   persisted.DwnEnbl ?? true,
-    DwnBmVi:   persisted.DwnBmVi ?? false,
-    AutoClose: persisted.AutoClose ?? true,
-    UseCustom: persisted.UseCustom ?? false,
-    customVid: persisted.customVid ?? '',
-    customNoVid: persisted.customNoVid ?? '',
-    ui: Object.assign({ x:24, y:24, w:360, h:230, minimized:false }, persisted.ui || {}),
+  const DEFAULTS = Object.freeze({
+    vid: 'https://catboy.best/d/${id}',
+    noVid: 'https://catboy.best/d/${id}n',
+  });
+
+  const clamp = (v, min, max) => (v < min ? min : v > max ? max : v);
+
+  const finite = (v, fb) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fb;
   };
 
-  const getId = () => {
-    const m = location.pathname.match(/^\/beatmapsets\/(\d+)(?:[\/?#]|$)/);
-    return m ? m[1] : null;
-  };
+  function sanitizeTemplate(input) {
+    if (typeof input !== 'string' || !input) return '';
+    let value = input.trim().replace(RE_WHITESPACE, '');
+    if (!value) return '';
 
-  const sanitize = (input) => {
-    if (!input) return '';
-    let s = input.trim().replace(/\s+/g, '');
-    if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
-    s = s.replace(/^http:\/\//i, 'https://');
-    if (!s.includes('${id}')) s += s.endsWith('/') ? '${id}' : '/${id}';
-    return /^https:\/\//i.test(s) ? s : '';
-  };
+    if (RE_HTTP.test(value)) {
+      value = value.replace(RE_HTTP, 'https://');
+    } else if (!RE_HTTPS.test(value)) {
+      if (RE_SCHEME.test(value)) return '';
+      value = 'https://' + value;
+    }
 
-  const resolveTpl = (noVid) => {
-    if (!state.UseCustom) return noVid ? DEF_NOVID : DEF_VID;
-    const t = noVid ? state.customNoVid : state.customVid;
-    return t || (noVid ? DEF_NOVID : DEF_VID);
-  };
-  const buildUrl = (id, noVid) => resolveTpl(noVid).replace(/\$\{id\}/g, encodeURIComponent(id));
+    if (!value.includes('${id}')) {
+      value += value.endsWith('/') ? '${id}' : '/${id}';
+    }
 
-  // ---- Robust opener ----
-  function openUrl(url) {
     try {
-      if (typeof GM_openInTab === 'function') { GM_openInTab(url, { active:false, insert:true }); return; }
-    } catch {}
-    try {
-      const a = document.createElement('a');
-      a.href = url; a.target = '_blank'; a.rel = 'noopener';
-      document.body.appendChild(a); a.click(); a.remove();
+      if (new URL(value.replace(RE_ID_TOKEN, '1')).protocol !== 'https:') return '';
     } catch {
-      location.href = url; // last resort
+      return '';
+    }
+    return value;
+  }
+
+  function loadSettings() {
+    let raw = null;
+    try {
+      raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+    } catch {
+      raw = null;
+    }
+    const r = raw && typeof raw === 'object' ? raw : {};
+    const ui = r.ui && typeof r.ui === 'object' ? r.ui : {};
+
+    return {
+      DwnEnbl: Boolean(r.DwnEnbl ?? true),
+      DwnBmVi: Boolean(r.DwnBmVi ?? false),
+      AutoClose: Boolean(r.AutoClose ?? true),
+      UseCustom: Boolean(r.UseCustom ?? false),
+      customVid: sanitizeTemplate(r.customVid),
+      customNoVid: sanitizeTemplate(r.customNoVid),
+      ui: {
+        x: finite(ui.x, 16),
+        y: finite(ui.y, -1), // -1 = anchor near bottom-left on first paint
+        minimized: Boolean(ui.minimized ?? false),
+      },
+    };
+  }
+
+  function saveSettings(settings) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    } catch {
+      // Ignore storage quota or private-mode failures.
     }
   }
 
-  // ---- Reliable auto-close (with fallback navigation only on detail pages) ----
-  function tryClose(detailId) {
-    if (!state.AutoClose) return;
-    window.close();
-    setTimeout(() => { open('', '_self'); window.close(); }, 100);
-    setTimeout(() => {
-      if (document.visibilityState !== 'hidden' && detailId) {
-        if (history.length > 1) history.back();
-        else location.replace('https://osu.ppy.sh/beatmapsets');
+  const getBeatmapsetId = (path = location.pathname) => {
+    const m = RE_SET_ID.exec(path);
+    return m ? m[1] : null;
+  };
+
+  function buildDownloadUrl(settings, id) {
+    const noVid = settings.DwnBmVi;
+    const fallback = noVid ? DEFAULTS.noVid : DEFAULTS.vid;
+    const tpl = settings.UseCustom ? ((noVid ? settings.customNoVid : settings.customVid) || fallback) : fallback;
+    return tpl.replace(RE_ID_TOKEN, encodeURIComponent(id));
+  }
+
+  function fallbackOpen(url) {
+    try {
+      const parent = document.body || document.documentElement;
+      if (parent) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.referrerPolicy = 'origin';
+        parent.appendChild(a);
+        a.click();
+        a.remove();
+        return;
       }
-    }, 300);
+    } catch {
+      // Fall through to GM_openInTab.
+    }
+
+    if (typeof GM_openInTab === 'function') {
+      try {
+        GM_openInTab(url, { active: false, insert: true });
+        return;
+      } catch {
+        // Fall through to current tab navigation.
+      }
+    }
+    location.href = url;
   }
 
-  // ---- Single-shot guard to prevent duplicate downloads on the same URL in quick succession ----
-let dlGuard = { id: null, t: 0 };
-function shouldRunOnce(id) {
-  const now = Date.now();
-  if (dlGuard.id === id && (now - dlGuard.t) < 1500) return false; // 1.5s debounce by ID
-  dlGuard = { id, t: now };
-  return true;
-}
+  function startDownload(url, id, onStarted) {
+    if (typeof GM_download === 'function') {
+      let started = false;
+      const markStarted = () => {
+        if (started) return;
+        started = true;
+        onStarted();
+      };
+      try {
+        GM_download({
+          url,
+          name: `${id}.osz`,
+          saveAs: false,
+          headers: { Referer: `${location.origin}/` },
+          onprogress: markStarted,
+          onload: markStarted,
+          onerror: () => {
+            fallbackOpen(url);
+            markStarted();
+          },
+        });
+        return;
+      } catch {
+        // Fall through to browser navigation.
+      }
+    }
+    fallbackOpen(url);
+    onStarted();
+  }
 
-  // ---- Auto-download on beatmap pages (reload-safe) ----
-function autoDownload() {
-  const id = getId();
-  if (!id || !state.DwnEnbl) return;
-  if (!shouldRunOnce(id)) return; // skip repeated triggers for same beatmap
-  const url = buildUrl(id, state.DwnBmVi);
-  openUrl(url);
-  tryClose(id);
-}
+  function createDownloader(settings) {
+    let activeId = null;
+    let lastId = null;
+    let lastTime = 0;
+    let t1 = 0;
+    let t2 = 0;
 
-  // ---- Overlay (visible on index & detail) ----
-  function makeOverlay() {
-    if (document.getElementById('ok-overlay-host')) return;
+    const clearTimers = () => {
+      if (t1) clearTimeout(t1);
+      if (t2) clearTimeout(t2);
+      t1 = 0;
+      t2 = 0;
+    };
+
+    const closeTab = (id) => {
+      if (!settings.AutoClose || getBeatmapsetId() !== id) return;
+      window.close();
+      if (!t1) {
+        t1 = setTimeout(() => {
+          t1 = 0;
+          if (getBeatmapsetId() !== id) return;
+          window.open('', '_self');
+          window.close();
+        }, 80);
+      }
+      if (!t2) {
+        t2 = setTimeout(() => {
+          t2 = 0;
+          if (document.visibilityState === 'hidden' || getBeatmapsetId() !== id) return;
+          if (history.length > 1) history.back();
+          else location.replace(INDEX_URL);
+        }, 320);
+      }
+    };
+
+    return function onRoute() {
+      const id = getBeatmapsetId();
+      if (!id) {
+        activeId = null;
+        clearTimers();
+        return false;
+      }
+      if (!settings.DwnEnbl || id === activeId) return false;
+
+      const now = Date.now();
+      if (lastId === id && now - lastTime < DEDUPE_MS) return false;
+
+      activeId = id;
+      lastId = id;
+      lastTime = now;
+      clearTimers();
+
+      const url = buildDownloadUrl(settings, id);
+      const fallbackCloseTimer = settings.AutoClose ? setTimeout(() => closeTab(id), 450) : 0;
+
+      startDownload(url, id, () => {
+        if (fallbackCloseTimer) clearTimeout(fallbackCloseTimer);
+        closeTab(id);
+      });
+      return settings.AutoClose;
+    };
+  }
+
+  // Palette mirrors osu.ppy.sh/beatmapsets CSS custom properties (--base-hue: 200).
+  const HUD_CSS = `
+    :host {
+      all: initial;
+      position: fixed;
+      top: 0;
+      left: 0;
+      z-index: 2147483647;
+      pointer-events: none;
+      --bg-bar: hsl(var(--hsl-b5, 200, 10%, 15%));
+      --bg-seg: hsl(var(--hsl-b4, 200, 10%, 20%));
+      --bg-hi: hsl(var(--hsl-b3, 200, 10%, 25%));
+      --line: hsl(var(--hsl-b2, 200, 10%, 30%));
+      --line-hi: hsl(var(--hsl-b1, 200, 10%, 40%));
+      --accent: hsl(var(--hsl-h1, 200, 100%, 70%));
+      --accent-dim: hsl(var(--hsl-h2, 200, 50%, 45%));
+      --ink: hsl(var(--hsl-c1, 200, 40%, 100%));
+      --ink-sub: hsl(var(--hsl-l2, 200, 40%, 75%));
+      --ink-off: hsl(var(--hsl-f1, 200, 10%, 60%));
+    }
+    *, *::before, *::after {
+      box-sizing: border-box;
+      font-family: Torus, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    .dock {
+      position: fixed;
+      top: 0;
+      left: 0;
+      pointer-events: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      will-change: transform;
+      user-select: none;
+    }
+    .bar {
+      display: inline-flex;
+      align-items: stretch;
+      height: 28px;
+      background: var(--bg-bar);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .grip {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 9px 0 11px;
+      background: var(--bg-seg);
+      border-right: 1px solid var(--line);
+      color: var(--ink-sub);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      cursor: grab;
+      touch-action: none;
+    }
+    .grip:active { cursor: grabbing; }
+    .grip::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 3px;
+      background: var(--line-hi);
+      transition: background 120ms ease;
+    }
+    .dock[data-armed="1"] .grip::before { background: var(--accent); }
+    .dock[data-armed="1"] .grip { color: var(--ink); }
+    .keys {
+      display: inline-flex;
+      align-items: stretch;
+    }
+    .dock[data-min="1"] .keys,
+    .dock[data-min="1"] .tray { display: none; }
+    .key {
+      position: relative;
+      appearance: none;
+      border: 0;
+      border-right: 1px solid var(--line);
+      background: transparent;
+      color: var(--ink-off);
+      padding: 0 9px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .03em;
+      cursor: pointer;
+      transition: background 110ms ease, color 110ms ease;
+    }
+    .key:last-child { border-right: 0; }
+    .key:hover { background: var(--bg-seg); color: var(--ink); }
+    .key[aria-pressed="true"] {
+      background: var(--bg-hi);
+      color: var(--ink);
+    }
+    .key[aria-pressed="true"]::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 2px;
+      background: var(--accent);
+    }
+    .tray {
+      width: 280px;
+      padding: 8px;
+      background: var(--bg-bar);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .tray[hidden] { display: none; }
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .tag {
+      width: 40px;
+      flex: 0 0 40px;
+      color: var(--ink-off);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .04em;
+    }
+    .in {
+      flex: 1;
+      min-width: 0;
+      height: 24px;
+      padding: 0 7px;
+      background: var(--bg-seg);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: var(--ink);
+      font-size: 11px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      outline: none;
+    }
+    .in::placeholder { color: var(--ink-off); opacity: .7; }
+    .in:focus { border-color: var(--accent-dim); }
+  `;
+
+  function mountHud(settings) {
+    if (document.getElementById(HOST_ID)) return;
+    const parent = document.body || document.documentElement;
+    if (!parent) return;
+
     const host = document.createElement('div');
-    host.id = 'ok-overlay-host';
-    host.style.position = 'fixed';
-    host.style.zIndex = '2147483647';
-    document.documentElement.appendChild(host);
+    host.id = HOST_ID;
+    parent.appendChild(host);
+
     const root = host.attachShadow({ mode: 'open' });
-
     const style = document.createElement('style');
-    style.textContent = `
-      :host{all:initial;}
-      *,*::before,*::after{box-sizing:border-box;font-family:system-ui,Segoe UI,Arial;}
-      .win{position:fixed;left:24px;top:24px;width:360px;height:230px;background:#111;color:#e5e7eb;
-        border:1px solid #333;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,.45);
-        display:flex;flex-direction:column;overflow:hidden;}
-      .titlebar{height:34px;background:#1a1a1a;border-bottom:1px solid #222;display:flex;align-items:center;
-        justify-content:space-between;padding:0 10px;cursor:move;user-select:none;}
-      .title{font-weight:600;font-size:13px;}
-      .btn{border:0;background:#222;color:#ccc;border-radius:4px;width:24px;height:24px;cursor:pointer;}
-      .btn:hover{background:#2c2c2c;}
-      .content{flex:1;padding:10px;font-size:13px;line-height:1.35;}
-      label.row{display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;}
-      input[type="checkbox"]{width:16px;height:16px;}
-      .field{display:flex;flex-direction:column;gap:4px;margin-top:6px;}
-      .field input[type="text"]{background:#0e0e0e;border:1px solid #2a2a2a;color:#e5e7eb;border-radius:6px;padding:6px 8px;}
-      .hint{font-size:11px;color:#a1a1aa;}
-      .resize{position:absolute;right:0;bottom:0;width:12px;height:12px;cursor:nwse-resize;
-        background:linear-gradient(135deg,transparent 50%,#555 50%);}
-    `;
-    root.appendChild(style);
+    style.textContent = HUD_CSS;
 
-    const win = document.createElement('div');
-    win.className = 'win';
-    win.innerHTML = `
-      <div class="titlebar" data-drag>
-        <div class="title">osu!koko <span style="opacity:.6">overlay</span></div>
-        <button class="btn" data-min>—</button>
-      </div>
-      <div class="content">
-        <label class="row"><input type="checkbox" id="DwnEnbl"> Download Enable</label>
-        <label class="row"><input type="checkbox" id="DwnBmVi"> Download Without Video</label>
-        <label class="row"><input type="checkbox" id="AutoClose"> Auto-Close After Download</label>
-        <label class="row"><input type="checkbox" id="UseCustom"> Use Custom Link</label>
-        <div id="customWrap">
-          <div class="field">
-            <label>Custom URL (with video)</label>
-            <input type="text" id="customVid" placeholder="https://catboy.best/d/\${id}">
-            <div class="hint">Empty = default <code>${DEF_VID}</code></div>
-          </div>
-          <div class="field">
-            <label>Custom URL (without video)</label>
-            <input type="text" id="customNoVid" placeholder="https://catboy.best/d/\${id}n">
-            <div class="hint">Empty = default <code>${DEF_NOVID}</code></div>
-          </div>
-        </div>
-      </div>
-      <div class="resize" data-resize></div>
-    `;
-    root.appendChild(win);
+    const dock = document.createElement('div');
+    dock.className = 'dock';
+    dock.innerHTML =
+      `<div class="bar">` +
+        `<div class="grip" data-grip title="Drag to move · Double-click to collapse">koko</div>` +
+        `<div class="keys">` +
+          `<button type="button" class="key" data-k="DwnEnbl" title="Auto-download">DL</button>` +
+          `<button type="button" class="key" data-k="DwnBmVi" title="Without video">NOVID</button>` +
+          `<button type="button" class="key" data-k="AutoClose" title="Auto-close tab">CLOSE</button>` +
+          `<button type="button" class="key" data-k="UseCustom" title="Use custom mirror">CUSTOM</button>` +
+          `<button type="button" class="key" data-tray title="Mirror URLs">⋯</button>` +
+        `</div>` +
+      `</div>` +
+      `<div class="tray" hidden>` +
+        `<div class="row"><span class="tag">VID</span><input class="in" type="text" data-u="customVid" placeholder="${DEFAULTS.vid}"></div>` +
+        `<div class="row"><span class="tag">NOVID</span><input class="in" type="text" data-u="customNoVid" placeholder="${DEFAULTS.noVid}"></div>` +
+      `</div>`;
 
-    const el = {
-      DwnEnbl: root.getElementById('DwnEnbl'),
-      DwnBmVi: root.getElementById('DwnBmVi'),
-      AutoClose: root.getElementById('AutoClose'),
-      UseCustom: root.getElementById('UseCustom'),
-      customVid: root.getElementById('customVid'),
-      customNoVid: root.getElementById('customNoVid'),
-      wrap: root.getElementById('customWrap'),
-      content: win.querySelector('.content'),
+    root.append(style, dock);
+
+    const tray = dock.querySelector('.tray');
+    const grip = dock.querySelector('[data-grip]');
+    const trayBtn = dock.querySelector('[data-tray]');
+    const keyBtns = dock.querySelectorAll('[data-k]');
+    const urlInputs = dock.querySelectorAll('[data-u]');
+
+    let trayOpen = false;
+    let posX = settings.ui.x;
+    let posY = settings.ui.y;
+    let rafResize = 0;
+
+    const setPosition = (x, y) => {
+      const rect = dock.getBoundingClientRect();
+      const maxX = Math.max(MARGIN, window.innerWidth - (rect.width || 220) - MARGIN);
+      const maxY = Math.max(MARGIN, window.innerHeight - (rect.height || 28) - MARGIN);
+      posX = clamp(x, MARGIN, maxX);
+      posY = clamp(y, MARGIN, maxY);
+      dock.style.transform = `translate3d(${posX}px, ${posY}px, 0)`;
     };
 
-    el.DwnEnbl.checked = state.DwnEnbl;
-    el.DwnBmVi.checked = state.DwnBmVi;
-    el.AutoClose.checked = state.AutoClose;
-    el.UseCustom.checked = state.UseCustom;
-    el.customVid.value = state.customVid;
-    el.customNoVid.value = state.customNoVid;
-
-    const toggleCustom = () => el.wrap.style.display = state.UseCustom ? '' : 'none';
-    toggleCustom();
-
-    const apply = () => {
-      const vw = window.innerWidth, vh = window.innerHeight, ui = state.ui;
-      ui.x = clamp(ui.x, 8, vw - 160); ui.y = clamp(ui.y, 8, vh - 80);
-      ui.w = clamp(ui.w, 300, vw - 32); ui.h = clamp(ui.h, 160, vh - 32);
-      Object.assign(win.style, { left: `${ui.x}px`, top: `${ui.y}px`, width: `${ui.w}px`, height: `${ui.h}px` });
+    const syncView = () => {
+      dock.dataset.armed = settings.DwnEnbl ? '1' : '0';
+      dock.dataset.min = settings.ui.minimized ? '1' : '0';
+      for (const btn of keyBtns) {
+        btn.setAttribute('aria-pressed', String(Boolean(settings[btn.dataset.k])));
+      }
+      tray.hidden = !trayOpen || settings.ui.minimized;
+      trayBtn.setAttribute('aria-pressed', String(!tray.hidden));
     };
-    const render = () => {
-      if (state.ui.minimized) { el.content.style.display = 'none'; win.style.height = '34px'; }
-      else { el.content.style.display = ''; apply(); }
-    };
-    apply(); render();
 
-    const drag = win.querySelector('[data-drag]');
-    drag.addEventListener('mousedown', e => {
+    for (const input of urlInputs) {
+      input.value = settings[input.dataset.u];
+    }
+    syncView();
+
+    if (posY < 0) posY = Math.max(MARGIN, window.innerHeight - 44);
+    setPosition(posX, posY);
+
+    // Single delegated click & change handlers inside Shadow DOM.
+    root.addEventListener('click', (e) => {
+      const target = e.target;
+      if (!(target instanceof HTMLElement)) return;
+
+      const key = target.dataset.k;
+      if (key) {
+        settings[key] = !settings[key];
+        if (key === 'UseCustom' && settings.UseCustom) trayOpen = true;
+        syncView();
+        setPosition(posX, posY);
+        saveSettings(settings);
+        return;
+      }
+
+      if ('tray' in target.dataset) {
+        trayOpen = !trayOpen;
+        syncView();
+        setPosition(posX, posY);
+      }
+    });
+
+    root.addEventListener('change', (e) => {
+      const target = e.target;
+      if (!(target instanceof HTMLInputElement)) return;
+      const field = target.dataset.u;
+      if (!field) return;
+
+      const cleaned = sanitizeTemplate(target.value);
+      settings[field] = cleaned;
+      target.value = cleaned;
+      saveSettings(settings);
+    });
+
+    grip.addEventListener('dblclick', () => {
+      settings.ui.minimized = !settings.ui.minimized;
+      syncView();
+      setPosition(posX, posY);
+      saveSettings(settings);
+    });
+
+    // GPU-composited pointer drag with capture (no global document listeners).
+    let drag = null;
+    grip.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
-      const r = win.getBoundingClientRect();
-      const sx = e.clientX, sy = e.clientY, ox = r.left, oy = r.top;
-      const move = e => {
-        win.style.left = clamp(ox + e.clientX - sx, 0, window.innerWidth - 80) + 'px';
-        win.style.top = clamp(oy + e.clientY - sy, 0, window.innerHeight - 40) + 'px';
-      };
-      const up = () => {
-        document.removeEventListener('mousemove', move);
-        document.removeEventListener('mouseup', up);
-        const r2 = win.getBoundingClientRect(); state.ui.x = r2.left; state.ui.y = r2.top; save(state);
-      };
-      document.addEventListener('mousemove', move);
-      document.addEventListener('mouseup', up);
-    });
-    drag.addEventListener('dblclick', () => { state.ui.minimized = !state.ui.minimized; render(); save(state); });
-
-    const resize = win.querySelector('.resize');
-    resize.addEventListener('mousedown', e => {
-      if (e.button !== 0) return;
-      const r = win.getBoundingClientRect();
-      const sx = e.clientX, sy = e.clientY, sw = r.width, sh = r.height;
-      const move = e => {
-        win.style.width = clamp(sw + e.clientX - sx, 300, window.innerWidth - 32) + 'px';
-        win.style.height = clamp(sh + e.clientY - sy, 160, window.innerHeight - 32) + 'px';
-      };
-      const up = () => {
-        document.removeEventListener('mousemove', move);
-        document.removeEventListener('mouseup', up);
-        const r2 = win.getBoundingClientRect(); state.ui.w = r2.width; state.ui.h = r2.height; save(state);
-      };
-      document.addEventListener('mousemove', move);
-      document.addEventListener('mouseup', up);
+      drag = { sx: e.clientX, sy: e.clientY, ox: posX, oy: posY, moved: false };
+      grip.setPointerCapture(e.pointerId);
     });
 
-    root.querySelector('[data-min]').addEventListener('click', () => {
-      state.ui.minimized = !state.ui.minimized; render(); save(state);
+    grip.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.sx;
+      const dy = e.clientY - drag.sy;
+      if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 3) return;
+      drag.moved = true;
+      setPosition(drag.ox + dx, drag.oy + dy);
     });
-    el.DwnEnbl.addEventListener('input', () => { state.DwnEnbl = el.DwnEnbl.checked; save(state); });
-    el.DwnBmVi.addEventListener('input', () => { state.DwnBmVi = el.DwnBmVi.checked; save(state); });
-    el.AutoClose.addEventListener('input', () => { state.AutoClose = el.AutoClose.checked; save(state); });
-    el.UseCustom.addEventListener('input', () => { state.UseCustom = el.UseCustom.checked; toggleCustom(); save(state); });
-    el.customVid.addEventListener('change', () => { state.customVid = sanitize(el.customVid.value); el.customVid.value = state.customVid; save(state); });
-    el.customNoVid.addEventListener('change', () => { state.customNoVid = sanitize(el.customNoVid.value); el.customNoVid.value = state.customNoVid; save(state); });
-    window.addEventListener('resize', apply);
+
+    const endDrag = (e) => {
+      if (!drag) return;
+      const moved = drag.moved;
+      drag = null;
+      if (grip.hasPointerCapture(e.pointerId)) grip.releasePointerCapture(e.pointerId);
+      if (moved) {
+        settings.ui.x = Math.round(posX);
+        settings.ui.y = Math.round(posY);
+        saveSettings(settings);
+      }
+    };
+    grip.addEventListener('pointerup', endDrag);
+    grip.addEventListener('pointercancel', endDrag);
+
+    window.addEventListener(
+      'resize',
+      () => {
+        if (rafResize) return;
+        rafResize = requestAnimationFrame(() => {
+          rafResize = 0;
+          setPosition(posX, posY);
+        });
+      },
+      { passive: true }
+    );
   }
 
-  // ---- SPA-safe route handling (single handler, with single-shot debounce) ----
-  function handleRoute() {
-    makeOverlay();
-    autoDownload();
+  function scheduleHudMount(settings) {
+    if (document.body) {
+      mountHud(settings);
+    } else {
+      document.addEventListener('DOMContentLoaded', () => mountHud(settings), { once: true });
+    }
   }
 
-  handleRoute(); // initial load
+  function watchRoutes(onChange) {
+    let lastHref = location.href;
+    const check = () => {
+      const href = location.href;
+      if (href === lastHref) return;
+      lastHref = href;
+      onChange();
+    };
 
-  const _ps = history.pushState, _rs = history.replaceState;
-  history.pushState = function(...a){ const r=_ps.apply(this,a); setTimeout(handleRoute,0); return r; };
-  history.replaceState = function(...a){ const r=_rs.apply(this,a); setTimeout(handleRoute,0); return r; };
-  window.addEventListener('popstate', handleRoute);
+    const wrap = (fn) =>
+      function wrappedHistory(...args) {
+        const res = fn.apply(this, args);
+        check();
+        return res;
+      };
 
-  let last = location.href;
-  new MutationObserver(() => {
-    if (location.href !== last) { last = location.href; handleRoute(); }
-  }).observe(document, { subtree:true, childList:true });
+    history.pushState = wrap(history.pushState);
+    history.replaceState = wrap(history.replaceState);
+    window.addEventListener('popstate', check, { passive: true });
+  }
 
+  const settings = loadSettings();
+  const handleDownload = createDownloader(settings);
+
+  // Fire download immediately at document-start before osu! hydrates.
+  const willAutoClose = handleDownload();
+
+  // Skip allocating HUD DOM on tabs that are actively closing; mount on index or if tab remains open.
+  if (willAutoClose) {
+    setTimeout(() => {
+      if (document.visibilityState !== 'hidden') scheduleHudMount(settings);
+    }, 350);
+  } else {
+    scheduleHudMount(settings);
+  }
+
+  watchRoutes(() => {
+    handleDownload();
+    scheduleHudMount(settings);
+  });
 })();
