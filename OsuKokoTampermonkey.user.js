@@ -1,13 +1,17 @@
 // ==UserScript==
 // @name         osu!koko
 // @namespace    chrafos
-// @version      1.2.0
+// @version      1.2.1
 // @description  Minimal osu!-native HUD + instant beatmapset auto-download, auto-close, and custom mirror templates.
 // @author       chrafos
-// @match        https://osu.ppy.sh/beatmapsets*
+// @match        https://osu.ppy.sh/beatmapsets
+// @match        https://osu.ppy.sh/beatmapsets/*
+// @match        https://osu.ppy.sh/s/*
+// @match        https://osu.ppy.sh/b/*
 // @run-at       document-start
 // @grant        GM_download
 // @grant        GM_openInTab
+// @grant        window.close
 // @connect      catboy.best
 // @connect      *
 // ==/UserScript==
@@ -21,7 +25,7 @@
   const DEDUPE_MS = 1500;
   const MARGIN = 10;
 
-  const RE_SET_ID = /^\/beatmapsets\/(\d+)(?:[/?#]|$)/;
+  const RE_SET_ID = /^\/(?:beatmapsets|s)\/(\d+)(?:[/?#]|$)/;
   const RE_WHITESPACE = /\s+/g;
   const RE_HTTP = /^http:\/\//i;
   const RE_HTTPS = /^https:\/\//i;
@@ -110,6 +114,7 @@
   }
 
   function fallbackOpen(url) {
+    // Prefer GM_openInTab fallback only after anchor click (anchor preserves Referer for catboy.best).
     try {
       const parent = document.body || document.documentElement;
       if (parent) {
@@ -121,7 +126,7 @@
         parent.appendChild(a);
         a.click();
         a.remove();
-        return;
+        return true;
       }
     } catch {
       // Fall through to GM_openInTab.
@@ -130,33 +135,37 @@
     if (typeof GM_openInTab === 'function') {
       try {
         GM_openInTab(url, { active: false, insert: true });
-        return;
+        return true;
       } catch {
         // Fall through to current tab navigation.
       }
     }
     location.href = url;
+    return false;
   }
 
-  function startDownload(url, id, onStarted) {
+  function startDownload(url, id, onReadyToClose) {
     if (typeof GM_download === 'function') {
-      let started = false;
-      const markStarted = () => {
-        if (started) return;
-        started = true;
-        onStarted();
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        onReadyToClose();
       };
       try {
+        // Wait for onload (not onprogress/450ms timer): navigating or closing early
+        // kills the tab's Tampermonkey sandbox and aborts in-flight GM_download.
         GM_download({
           url,
           name: `${id}.osz`,
           saveAs: false,
           headers: { Referer: `${location.origin}/` },
-          onprogress: markStarted,
-          onload: markStarted,
+          onload: done,
           onerror: () => {
-            fallbackOpen(url);
-            markStarted();
+            if (fallbackOpen(url)) done();
+          },
+          ontimeout: () => {
+            if (fallbackOpen(url)) done();
           },
         });
         return;
@@ -164,8 +173,7 @@
         // Fall through to browser navigation.
       }
     }
-    fallbackOpen(url);
-    onStarted();
+    if (fallbackOpen(url)) onReadyToClose();
   }
 
   function createDownloader(settings) {
@@ -191,7 +199,7 @@
           if (getBeatmapsetId() !== id) return;
           window.open('', '_self');
           window.close();
-        }, 80);
+        }, 120);
       }
       if (!t2) {
         t2 = setTimeout(() => {
@@ -199,7 +207,7 @@
           if (document.visibilityState === 'hidden' || getBeatmapsetId() !== id) return;
           if (history.length > 1) history.back();
           else location.replace(INDEX_URL);
-        }, 320);
+        }, 400);
       }
     };
 
@@ -221,13 +229,8 @@
       clearTimers();
 
       const url = buildDownloadUrl(settings, id);
-      const fallbackCloseTimer = settings.AutoClose ? setTimeout(() => closeTab(id), 450) : 0;
-
-      startDownload(url, id, () => {
-        if (fallbackCloseTimer) clearTimeout(fallbackCloseTimer);
-        closeTab(id);
-      });
-      return settings.AutoClose;
+      startDownload(url, id, () => closeTab(id));
+      return true;
     };
   }
 
@@ -568,13 +571,13 @@
   const handleDownload = createDownloader(settings);
 
   // Fire download immediately at document-start before osu! hydrates.
-  const willAutoClose = handleDownload();
+  const triggered = handleDownload();
 
-  // Skip allocating HUD DOM on tabs that are actively closing; mount on index or if tab remains open.
-  if (willAutoClose) {
+  // Mount HUD immediately unless tab is actively downloading with AutoClose enabled.
+  if (triggered && settings.AutoClose) {
     setTimeout(() => {
       if (document.visibilityState !== 'hidden') scheduleHudMount(settings);
-    }, 350);
+    }, 600);
   } else {
     scheduleHudMount(settings);
   }
