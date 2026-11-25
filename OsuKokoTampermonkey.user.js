@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         osu!koko
 // @namespace    chrafos
-// @version      1.2.1
+// @version      1.2.2
 // @description  Minimal osu!-native HUD + instant beatmapset auto-download, auto-close, and custom mirror templates.
 // @author       chrafos
 // @match        https://osu.ppy.sh/beatmapsets
@@ -21,6 +21,7 @@
 
   const STORAGE_KEY = 'osukoko.overlay.settings';
   const HOST_ID = 'ok-hud-host';
+  const PRECONNECT_ID = 'ok-mirror-preconnect';
   const INDEX_URL = 'https://osu.ppy.sh/beatmapsets';
   const DEDUPE_MS = 1500;
   const MARGIN = 10;
@@ -83,6 +84,7 @@
       DwnBmVi: Boolean(r.DwnBmVi ?? false),
       AutoClose: Boolean(r.AutoClose ?? true),
       UseCustom: Boolean(r.UseCustom ?? false),
+      DirectOpen: Boolean(r.DirectOpen ?? false),
       customVid: sanitizeTemplate(r.customVid),
       customNoVid: sanitizeTemplate(r.customNoVid),
       ui: {
@@ -106,11 +108,50 @@
     return m ? m[1] : null;
   };
 
-  function buildDownloadUrl(settings, id) {
+  function getActiveTemplate(settings) {
     const noVid = settings.DwnBmVi;
     const fallback = noVid ? DEFAULTS.noVid : DEFAULTS.vid;
-    const tpl = settings.UseCustom ? ((noVid ? settings.customNoVid : settings.customVid) || fallback) : fallback;
-    return tpl.replace(RE_ID_TOKEN, encodeURIComponent(id));
+    return settings.UseCustom ? ((noVid ? settings.customNoVid : settings.customVid) || fallback) : fallback;
+  }
+
+  function buildDownloadUrl(settings, id) {
+    return getActiveTemplate(settings).replace(RE_ID_TOKEN, encodeURIComponent(id));
+  }
+
+  function preconnectMirror(settings) {
+    let origin = '';
+    try {
+      origin = new URL(getActiveTemplate(settings).replace(RE_ID_TOKEN, '1')).origin;
+    } catch {
+      return;
+    }
+    const head = document.head || document.documentElement;
+    if (!head) return;
+
+    let link = document.getElementById(PRECONNECT_ID);
+    if (!link) {
+      link = document.createElement('link');
+      link.id = PRECONNECT_ID;
+      link.rel = 'preconnect';
+      head.appendChild(link);
+    }
+    if (link.href !== origin && link.href !== `${origin}/`) {
+      link.href = origin;
+    }
+  }
+
+  function openExternalDownload(url) {
+    // Prefer GM_openInTab for DirectOpen so background tabs hand off to browser/external DMs
+    // without waiting for GM_download XHR buffering or hitting popup blockers at document-start.
+    if (typeof GM_openInTab === 'function') {
+      try {
+        GM_openInTab(url, { active: false, insert: true });
+        return true;
+      } catch {
+        // Fall through to anchor/location fallback.
+      }
+    }
+    return fallbackOpen(url);
   }
 
   function fallbackOpen(url) {
@@ -144,7 +185,11 @@
     return false;
   }
 
-  function startDownload(url, id, onReadyToClose) {
+  function startDownload(url, id, settings, onReadyToClose) {
+    if (settings.DirectOpen) {
+      if (openExternalDownload(url)) onReadyToClose();
+      return;
+    }
     if (typeof GM_download === 'function') {
       let settled = false;
       const done = () => {
@@ -229,7 +274,7 @@
       clearTimers();
 
       const url = buildDownloadUrl(settings, id);
-      startDownload(url, id, () => closeTab(id));
+      startDownload(url, id, settings, () => closeTab(id));
       return true;
     };
   }
@@ -404,6 +449,7 @@
           `<button type="button" class="key" data-k="DwnEnbl" title="Auto-download">DL</button>` +
           `<button type="button" class="key" data-k="DwnBmVi" title="Without video">NOVID</button>` +
           `<button type="button" class="key" data-k="AutoClose" title="Auto-close tab">CLOSE</button>` +
+          `<button type="button" class="key" data-k="DirectOpen" title="Bypass GM_download (for external download managers)">DIRECT</button>` +
           `<button type="button" class="key" data-k="UseCustom" title="Use custom mirror">CUSTOM</button>` +
           `<button type="button" class="key" data-tray title="Mirror URLs">⋯</button>` +
         `</div>` +
@@ -465,6 +511,7 @@
         syncView();
         setPosition(posX, posY);
         saveSettings(settings);
+        if (key === 'UseCustom' || key === 'DwnBmVi') preconnectMirror(settings);
         return;
       }
 
@@ -485,6 +532,7 @@
       settings[field] = cleaned;
       target.value = cleaned;
       saveSettings(settings);
+      preconnectMirror(settings);
     });
 
     grip.addEventListener('dblclick', () => {
@@ -569,6 +617,9 @@
 
   const settings = loadSettings();
   const handleDownload = createDownloader(settings);
+
+  // Warm DNS/TLS to the active mirror origin (default or custom) immediately.
+  preconnectMirror(settings);
 
   // Fire download immediately at document-start before osu! hydrates.
   const triggered = handleDownload();
